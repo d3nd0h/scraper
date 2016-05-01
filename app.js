@@ -1,104 +1,118 @@
+var Promise = require('bluebird');
 var cheerio = require('cheerio');
+var request = Promise.promisify(require('request'));
 
-function getRequest(address, method, callback) {
-    var request = require('request');
-    request({
-        method : method,
-        url: address
-    }, function(err, response, body) {
-        if(err) {
+function getRequest(address, method) {
+    return new Promise(function(resolve, reject) {
+        request({
+            method: method,
+            url: address,
+        }).then(function(body) {
+            resolve(body);
+        }).catch(function(err) {
             console.log(err);
-            return callback(err);
-        }
-        return callback(null, body);
+        });
     });
 }
 
 getRequest(
     'http://m.bnizona.com/index.php/category/index/promo', 
-    'GET', 
-    function(err, body) {
-        if(!err) {
-            process(body);
-        }
+    'GET'
+    ).then(function(body) {
+        // call promise to process main page
+        return process(body);
+    }).then(function(res) {
+        // write output to file
+        var fs = require('fs');
+        fs.writeFile('result.json', JSON.stringify(res, null, 2));
     });
-
-var jsonResult = {};
 
 function process(body) {
-    $ = cheerio.load(body, {
-        normalizeWhitespace: true
-    });
+    return new Promise(function(resolve, reject) {
+        $ = cheerio.load(body.body, {
+            normalizeWhitespace: true
+        });
 
-    var cnt = 0;
-    $('a', 'ul.menu').each(function(index, element) {
-        cnt++; var target = $('a', 'ul.menu').length;
-        element = $(element);
-        var href = element.attr('href');
-        var category = cleanString(element.text());
-        jsonResult[category] = {};
-        jsonResult[category]["link"] = href;
-        getRequest(
-            href,
-            'GET',
-            function(err, body) {
-                if(!err)
-                    processCategory(body, function(result) {
-                        jsonResult[category]["subcategories"] = result;
-                        if(cnt == target) {
-                            var fs = require('fs');
-                            fs.writeFile('result.json', JSON.stringify(jsonResult, null, 4));
-                        }
-                    });
-            });
+        var jsonResult = {};
+
+        var functionList = [];
+        var categories = [];
+
+        // process each link
+        $('a', 'ul.menu').each(function(index, element) {
+            element = $(element);
+            var href = element.attr('href');
+            var category = cleanString(element.text());
+            categories.push(category);
+            jsonResult[category] = {};
+            jsonResult[category]["link"] = href;
+            functionList.push(getRequest(href, 'GET').then(function(body) {
+                return processCategory(body);
+            }));
+        });
+
+        // parallel scraping each subcategory
+        Promise.all(functionList)
+            .then(function(res) {
+                // console.log(res);
+                for(var i=0; i<res.length; i++) {
+                    jsonResult[categories[i]]["subcategory"] = res[i];
+                }
+                resolve(jsonResult);
+            })
     });
-    var fs = require('fs');
-    fs.writeFile('result.json', JSON.stringify(jsonResult, null, 4));
 }
 
 function cleanString(str) {
     return str.replace(/[^\w]/gi, '').toLowerCase();
 }
 
-function processCategory(body, callback) {
-    $ = cheerio.load(body, {
-        normalizeWhitespace : true
-    });
-    var jsonResultCategory = [];
+function processCategory(body) {
+    return new Promise(function(resolve, reject) {
+        $ = cheerio.load(body.body, {
+            normalizeWhitespace : true
+        });
+        var jsonResultCategory = [];
 
-    var cnt = 0;
+        var functionList = [];
 
-    $('ul#lists').find('a').each(function(index, element) {
-        var content = $(element);
-        var temp = {};
-        ++cnt;
-        var target = $('ul#lists').find('a').length;
-        temp = {
-            link : $(this).attr('href'),
-            img : $('img', content).attr('src'),
-            merchant_name : $('span.merchant-name', content).text(),
-            promo_title : $('span.promo-title', content).text(),
-            valid_until : $('span.valid-until', content).text()
-        };
-        getDetails($(this).attr('href'), function(details) {
-            temp["more_details"] = details;
+        // process each link
+        $('ul#lists').find('a').each(function(index, element) {
+            var content = $(element);
+            var temp = {};
+            var target = $('ul#lists').find('a').length;
+            temp = {
+                link : $(this).attr('href'),
+                img : $('img', content).attr('src'),
+                merchant_name : $('span.merchant-name', content).text(),
+                promo_title : $('span.promo-title', content).text(),
+                valid_until : $('span.valid-until', content).text()
+            };
             jsonResultCategory.push(temp);
+            functionList.push(getDetails($(this).attr('href')));
+        });
 
-            if (cnt == target) {
-                return callback(jsonResultCategory);
-            }
-        })
+        // paralel scraping each subcategory details
+        Promise.all(functionList)
+            .then(function(res) {
+                for(var i=0; i<res.length; i++) {
+                    jsonResultCategory[i]["more_details"] = res[i];
+                }
+                return jsonResultCategory;
+            }).then(function(res) {
+                resolve(res);
+            });
     });
 }
 
-function getDetails(url, callback) {
-    var details = {};
-    getRequest(
-        url,
-        'GET',
-        function(err, body) {
-            if(!err) {
-                $ = cheerio.load(body);
+function getDetails(url) {
+    return new Promise(function(resolve, reject) {
+        getRequest(
+            url,
+            'GET'
+            ).then(function(body) {
+                var details = {};
+                $ = cheerio.load(body.body);
                 // get banner
                 details["banner"] = $('img', 'div.banner').attr('src');
 
@@ -120,7 +134,9 @@ function getDetails(url, callback) {
                         temp = $(this).text();
                     details["merchant_location"].push(temp);
                 });
-            }
-            return callback(details);
-        });
+                return details;
+            }).then(function(details) {
+                resolve(details);
+            });
+    });
 }
